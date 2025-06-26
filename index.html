@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<meta name="theme-color" content="#ffffff">
+<script src="plotly-2.35.2.min.js" charset="utf-8"></script>
+<script src="tsne.min.js" charset="utf-8"></script>
+
+<style>
+		/* Styling the list to have multiple columns */
+		body > * {
+			font-size: 32px; /*32px for mobile;  16px for for desktop*/ 
+		}
+		
+		body {
+			padding : 20px
+		}
+		
+		#textResults {
+				display: grid;
+				/*grid-template-columns: repeat(auto-fill, minmax(20rem, 2fr));  /* for mobile */
+				grid-template-columns: repeat(auto-fill, minmax(10rem, 2fr));  /* for desktop */
+				column-gap: 20px; /* Spacing between columns */
+				list-style-type: none; /* Remove default bullets */
+				padding: 0;
+		}
+		/* Style for the list items */
+		#textResults li {
+				padding: 5px;
+				background-color: #f0f0f0;
+				margin: 5px 0;
+				border-radius: 4px;
+		}
+		@media screen and (min-width: 600px) {
+				body > * {
+				font-size: 32px;/*32px for mobile;  16px for for desktop*/ 
+			}
+				#textResults {
+				/*grid-template-columns: repeat(auto-fill, minmax(10rem, 2fr));  /* Number of columns */
+				grid-template-columns: repeat(auto-fill, minmax(20rem, 2fr));  /* for mobile */
+				
+			}
+		}
+		
+</style>
+</head>
+<body>
+<input type="file" id="fileInput"> </input>
+<input type="text" id="wordInput" onkeydown="search(this)"> </input>
+<button onclick="find_similar()">Find similar</button>
+<p id="message">Load the data</p>
+<div id='myDiv'><!-- Plotly chart will be drawn inside this DIV --></div>
+<ul id="textResults"></ul>
+
+</body>
+
+
+<script>
+var is_mobile = false
+if(window.matchMedia("(max-width: 600px)").matches) {
+	is_mobile = true;
+} 
+console.log(is_mobile)
+is_mobile = true
+console.log("test")
+function cosineSimilarity(vecA, vecB) {
+    const dotProduct = vecA.reduce((sum, a, idx) => sum + (a * vecB[idx]), 0);
+    const magnitudeA = Math.sqrt(vecA.reduce((sum, a) => sum + (a * a), 0));
+    const magnitudeB = Math.sqrt(vecB.reduce((sum, b) => sum + (b * b), 0));
+    return dotProduct / (magnitudeA * magnitudeB);
+	}
+
+var file = null;
+var entryCount = 0;
+	
+const FLOAT32_BYTES = 4;
+	
+	
+async function* getVectorEntryGenerator(file) {
+	const reader = file.stream().getReader();
+	const textDecoder = new TextDecoder("utf-8");
+	const SPACE_BYTE = 0x20;
+	const NEWLINE_BYTE = 0x0A;
+	var FLOAT32_COUNT = null;
+	var VECTOR_BYTES_LENGTH = null;
+	
+	let buffer = new Uint8Array(0);
+	let readDone = false;
+	var beggining = true;
+	try {
+		while(true) {
+			if (!readDone) {
+				const {value, done} = await reader.read();
+				readDone = done;
+				
+				if (value) {
+					const newBuffer = new Uint8Array(buffer.length + value.length);
+					newBuffer.set(buffer);
+					newBuffer.set(value, buffer.length);
+					buffer = newBuffer;
+					if(beggining) {
+						var initial_offset = 0;
+						for (let i = 0; i < buffer.length; i++) {
+							if (buffer[i] === SPACE_BYTE) {
+								entryCount = parseInt(textDecoder.decode(buffer.subarray(0, i)));
+								initial_offset = i;
+								break;
+							}
+						}
+						for (let i = initial_offset+1; i < buffer.length; i++) {
+							if (buffer[i] === NEWLINE_BYTE) {
+								FLOAT32_COUNT = parseInt(textDecoder.decode(buffer.subarray(initial_offset+1, i)));
+								VECTOR_BYTES_LENGTH = FLOAT32_COUNT * FLOAT32_BYTES;
+								initial_offset = i;
+								break
+							}
+						}
+						buffer = buffer.subarray(initial_offset-1) //skip first 10 bytes
+						beggining = false
+					}
+				}
+			}
+			
+			while(true) { 
+				const initialBufferLength = buffer.length;
+				let wordEndIndex = -1;
+				
+				for (let i = 0; i < buffer.length; i++) {
+					if (buffer[i] === SPACE_BYTE) {
+						wordEndIndex = i;
+						break;
+					}
+				}
+				
+				if (wordEndIndex !== -1 && buffer.length >= wordEndIndex + 1 + VECTOR_BYTES_LENGTH) {
+					const wordBytes = buffer.subarray(0, wordEndIndex);
+					const word = textDecoder.decode(wordBytes);
+					
+					const vectorBytesOffset = wordEndIndex + 1;
+					const vectorBytes = buffer.subarray(
+						vectorBytesOffset, 
+						vectorBytesOffset + VECTOR_BYTES_LENGTH
+					);
+					
+					const dataView = new DataView(
+						vectorBytes.buffer,
+						vectorBytes.byteOffset,
+						vectorBytes.byteLength
+					);
+					const vector = new Float32Array(FLOAT32_COUNT);
+					for (let i = 0; i < FLOAT32_COUNT; i++) {
+						vector[i] = dataView.getFloat32(i * FLOAT32_BYTES, true);
+					}
+					
+					buffer = buffer.subarray(wordEndIndex + 1 + VECTOR_BYTES_LENGTH);
+					
+					yield {word, vector} ;
+					
+				}
+				else {
+					break;
+				}
+			}
+			if (readDone) { break;}
+		}
+	} catch (error) {
+		console.error("Error :", error);
+	}
+}
+
+
+function find_similar() {
+	if (file != null)
+	{
+		show_similar(file, document.querySelector("#wordInput").value)
+	} else {
+		console.log("no bin data")
+	}
+}
+
+function search(element) { 
+	if (event.key == 'Enter' && file != null) {
+		show_similar(file, element.value)
+	}
+}
+
+function map_colors(value) {
+    colormap = [[0.0, [13, 8, 135]],
+    [0.25, [126, 3, 167]],
+    [0.5, [203, 71, 119]],
+    [0.75, [248, 149, 64]],
+    [1.0, [240, 249, 33]]]
+		
+		for (var i = 0; i < colormap.length-1; i++) {
+		const a = colormap[i][0]
+		const b = colormap[i+1][0]
+			if (a <= value/50 && value/50 <= b) {
+				const t = ((value/50)-a)/(b-a)
+				return `rgb(${Math.round(colormap[i][1][0]*(1-t) + colormap[i+1][1][0]*t)},` +
+				        `${Math.round(colormap[i][1][1]*(1-t) + colormap[i+1][1][1]*t)},` +
+				        `${Math.round(colormap[i][1][2]*(1-t) + colormap[i+1][1][2]*t)})`
+			}
+		}
+}
+
+
+async function show_similar(file, startWord) {
+		document.querySelector("#message").textContent = "finding most similar words"
+		const entryGenerator1 = await getVectorEntryGenerator(file)
+		//find the embedding for a word
+		var curCount = 0;
+		var target_vector = null
+		//ADD TRY BLOCK
+		
+		for await (const entry of entryGenerator1) {
+			curCount += 1;
+			if (curCount%Math.round(entryCount/100) == 1) {
+				document.querySelector("#message").textContent = "finding most similar words (finding current word " + Math.round(curCount*1000/entryCount)/10 + "% searched)"
+			}
+			if (entry.word == startWord) {
+				target_vector = entry.vector;
+				break;
+			}
+		}
+			
+		
+		//find the closest embeddings
+		mostSimilar = []
+		curCount = 0
+		const entryGenerator2 = await getVectorEntryGenerator(file)
+		for await (const entry of entryGenerator2) {
+			curCount += 1;
+						if (curCount%(Math.round(entryCount/100)) == 1) {
+				document.querySelector("#message").textContent = "finding most similar words (comparing words " + Math.round(curCount*1000/entryCount)/10 + "% processed)"
+			}
+			if (mostSimilar.length < 2*50) {
+			const similarity = cosineSimilarity(target_vector, entry.vector)
+				mostSimilar.push({word: entry.word, floats: entry.vector, similarity})
+			}
+			else {
+				mostSimilar = mostSimilar.sort((a,b) => b["similarity"] - a["similarity"]).slice(0,50)
+			}
+		}
+		mostSimilar = mostSimilar.sort((a,b) => b["similarity"] - a["similarity"]).slice(0,50)
+    
+    console.log(mostSimilar);
+			
+		let model = new TSNE({
+			dim: 2,
+			perplexity: 30.0,
+			earlyExaggeration: 4.0,
+			learningRate: 10.0,
+			nIter: 1000,
+			metric: 'euclidean'
+		});
+
+		// inputData is a nested array which can be converted into an ndarray
+		// alternatively, it can be an array of coordinates (second argument should be specified as 'sparse')
+		similarity_matrix = mostSimilar.map((x) => 
+													mostSimilar.map((y) => 
+														cosineSimilarity(x["floats"], y["floats"])))
+		
+		model.init({
+			data: similarity_matrix,//mostSimilar.map(x => x["floats"]),
+			type: 'dense'
+		});
+
+		// `error`,  `iter`: final error and iteration number
+		// note: computation-heavy action happens here
+		let [error, iter] = model.run();
+
+		// rerun without re-calculating pairwise distances, etc.
+		//let [error, iter] = model.rerun();
+
+		// `output` is unpacked ndarray (regular nested javascript array)
+		let output = model.getOutput();
+
+		// `outputScaled` is `output` scaled to a range of [-1, 1]
+		let outputScaled = model.getOutputScaled();
+		
+	//removes all previous elements	
+	const element = document.querySelector("#textResults");
+	while (element.firstChild) {
+		element.removeChild(element.firstChild);
+	}
+	
+	//list in textual form
+	mostSimilar.forEach((x, i) => {
+		const entry = document.createElement("li");
+		entry.textContent = i + " " + x["word"];
+		entry.addEventListener("click", (e) => {
+			Plotly.Fx.hover('myDiv', [{pointNumber : i}]);
+		})
+		console.log(map_colors(50-i))
+		entry.style.backgroundColor = map_colors(50-i)
+		if (21 < i) {entry.style.color = "white"}
+		
+		document.querySelector("#textResults").appendChild(entry);
+		});
+	console.log(mostSimilar.map( x => x["similarity"]))
+	document.querySelector("#message").textContent = "DONE"
+		
+		var trace1 = {
+			x: outputScaled.map((x) => x[0]),
+			y: outputScaled.map((x) => x[1]),
+			mode: 'markers',
+			type: 'scatter',
+			hovertemplate : '<b>%{text}</b><br>%{customdata[0]} (%{customdata[1]:.3f})<extra></extra>',
+			hoverlabel : {font : {size : [18, 36][is_mobile + 0]}},
+			customdata : mostSimilar.map( (x, i) => [ i, x["similarity"]]),
+			text: mostSimilar.map( (x) => x["word"]),
+			marker: { size: [8,16][is_mobile + 0], 
+				color : Array.from(mostSimilar.keys()).map(x => -x),
+				colorscale : [
+    [0.0, 'rgb(13, 8, 135)'],
+    [0.25, 'rgb(126, 3, 167)'],
+    [0.5, 'rgb(203, 71, 119)'],
+    [0.75, 'rgb(248, 149, 64)'],
+    [1.0, 'rgb(240, 249, 33)']
+]
+			}
+		};
+
+		var data = [ trace1];
+
+		var layout = {
+		
+		  //width: 700,
+			height: [500, 700][is_mobile + 0],
+			xaxis: {
+				range: [-1.2, 1.2],
+				fixedrange: true
+			},
+			yaxis: {
+				range: [-1.2, 1.2],
+				fixedrange: true
+			},
+			margin : {l:20, r:20, b:20, t:20},
+		};
+
+		Plotly.newPlot('myDiv', data, layout, {interactive : true, displayModeBar: false, scrollZoom: false});
+		
+
+}
+
+// Example usage: assuming file input in an HTML form
+document.getElementById('fileInput').addEventListener('change', function(event) {
+  file = event.target.files[0];
+  /*if (file) {
+    loadBinaryFile(file);
+  }*/
+});
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('service-worker.js').catch(err => {
+      console.error('Service worker registration failed:', err);
+    });
+  });
+}
+</script>
+
+</html>
